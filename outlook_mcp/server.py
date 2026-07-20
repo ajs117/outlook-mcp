@@ -178,10 +178,12 @@ def move_message(message_id: str, destination_folder: str) -> dict:
 
 
 @mcp.tool()
-def delete_message(message_id: str) -> dict:
-    """Move a message (by ref or raw id) to Deleted Items (soft delete, recoverable until emptied)."""
-    graph.delete_message(message_id)
-    return {"ref": message_id, "deleted": True}
+def delete_message(message_id: str, mark_as_read: bool = True) -> dict:
+    """Move a message (by ref or raw id) to Deleted Items — recoverable from there
+    until you empty it. Marks it read first (mark_as_read=False to keep it unread)
+    so deleted mail doesn't linger in your unread count."""
+    graph.delete_message(message_id, mark_as_read=mark_as_read)
+    return {"ref": message_id, "deleted": True, "markedRead": mark_as_read}
 
 
 @mcp.tool()
@@ -220,9 +222,10 @@ def bulk_archive_messages(message_ids: list[str]) -> dict:
 
 
 @mcp.tool()
-def bulk_delete_messages(message_ids: list[str]) -> dict:
-    """Soft-delete many messages (refs or raw ids) — move to Deleted Items — in one call."""
-    return graph.bulk_delete_messages(message_ids)
+def bulk_delete_messages(message_ids: list[str], mark_as_read: bool = True) -> dict:
+    """Move many messages (refs or raw ids) to Deleted Items in one call, marking
+    them read first (mark_as_read=False to keep them unread)."""
+    return graph.bulk_delete_messages(message_ids, mark_as_read=mark_as_read)
 
 
 _BULK_ACTIONS = ("archive", "delete", "mark_read", "mark_unread", "move")

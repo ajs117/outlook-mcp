@@ -213,15 +213,22 @@ def move_message(message_id: str, destination_folder: str) -> dict:
         return r.json()
 
 
-def delete_message(message_id: str) -> None:
-    """Move the message to the *visible* Deleted Items folder.
+def delete_message(message_id: str, mark_as_read: bool = True) -> None:
+    """Move the message to the *visible* Deleted Items folder, marking it read
+    first so deleted mail doesn't keep inflating the unread count.
 
     Deliberately uses the /move action, NOT the HTTP DELETE verb. Graph's DELETE
     on a message does not put it in Deleted Items — it soft-deletes into the
     hidden Recoverable Items ("dumpster") area, where the message vanishes from
     Outlook entirely and is only retrievable via "Recover items deleted from
     this folder". That is not what a user means by "delete", so we move instead.
+
+    Order matters: a move mints a NEW message id, so the read flag must be set
+    before the move, not after.
     """
+    message_id = resolve_id(message_id)
+    if mark_as_read:
+        mark_read(message_id, True)
     move_message(message_id, "deleteditems")
 
 
@@ -276,11 +283,19 @@ def bulk_archive_messages(message_ids: list[str]) -> dict:
     return bulk_move_messages(message_ids, "archive")
 
 
-def bulk_delete_messages(message_ids: list[str]) -> dict:
-    """Move each message to the visible Deleted Items folder — same semantics as
-    delete_message(), and for the same reason it uses /move rather than the HTTP
-    DELETE verb (DELETE hides mail in the Recoverable Items dumpster)."""
-    return bulk_move_messages(message_ids, "deleteditems")
+def bulk_delete_messages(message_ids: list[str], mark_as_read: bool = True) -> dict:
+    """Move each message to the visible Deleted Items folder, marking them read
+    first — same semantics as delete_message(), and for the same reason it uses
+    /move rather than the HTTP DELETE verb (DELETE hides mail in the Recoverable
+    Items dumpster).
+
+    The read pass runs before the move because moving mints new message ids."""
+    message_ids = [resolve_id(m) for m in message_ids]
+    marked = bulk_mark_read(message_ids, True)["ok"] if mark_as_read else None
+    res = bulk_move_messages(message_ids, "deleteditems")
+    if marked is not None:
+        res["marked_read"] = marked
+    return res
 
 
 def create_draft(
