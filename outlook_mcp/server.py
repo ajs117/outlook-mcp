@@ -237,6 +237,7 @@ def bulk_by_query(
     destination_folder: Optional[str] = None,
     received_before: Optional[str] = None,
     received_after: Optional[str] = None,
+    only_newsletters: bool = False,
     max_results: int = 1000,
     dry_run: bool = True,
 ) -> dict:
@@ -252,6 +253,9 @@ def bulk_by_query(
         client-side AFTER matching, so they compose with `search` — which Graph
         itself won't combine with a date $filter. Use these for "old <topic>"
         sweeps, e.g. search="delivery" + received_before to clear old shipping mail.
+    only_newsletters: keep only bulk/newsletter mail (messages with a
+        List-Unsubscribe header) among the matches, e.g. archive all newsletters
+        older than a week. Costs an extra batched header pass over the matches.
     dry_run: TRUE by default — returns how many messages would be affected plus a
         small sample of subjects/senders, and does nothing. Review it, then call
         again with dry_run=False to actually run the action. This guards against
@@ -276,6 +280,12 @@ def bulk_by_query(
         msgs = [m for m in msgs if (m.get("receivedDateTime") or "") < received_before]
     if received_after:
         msgs = [m for m in msgs if (m.get("receivedDateTime") or "") > received_after]
+    if only_newsletters:
+        detailed = graph.batch_get_headers([m["id"] for m in msgs])
+        newsletter_ids = {
+            d["id"] for d in detailed if graph.parse_unsubscribe(d)["method"] != "none"
+        }
+        msgs = [m for m in msgs if m["id"] in newsletter_ids]
     ids = [m["id"] for m in msgs]
 
     if dry_run:

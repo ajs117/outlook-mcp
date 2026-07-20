@@ -26,7 +26,10 @@ and `unsubscribe`.
   how each can be unsubscribed; call `unsubscribe(ref, execute=True)` per sender.
   RFC 8058 one-click senders are unsubscribed with a single POST (no browser);
   `mailto` senders get an unsubscribe draft to send; link-only senders return a
-  URL to open yourself (never auto-fetched). Then `bulk_by_query` to clear them.
+  URL to open yourself (never auto-fetched). Then clear them with
+  `bulk_by_query(action="archive", only_newsletters=True)` — the
+  `only_newsletters` filter keeps just the bulk mail (List-Unsubscribe header)
+  among the matches, so you can e.g. archive every newsletter older than a week.
   Note: unsubscribing confirms your address is live — do it for legitimate
   senders; for real spam, just delete/block.
 - **Draft an email.** `create_draft(to, subject, body)` saves to Drafts and
