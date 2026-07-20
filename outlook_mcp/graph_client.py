@@ -109,6 +109,39 @@ def list_folders() -> list[dict]:
         return r.json().get("value", [])
 
 
+# Graph accepts these well-known names directly in place of a folder id.
+WELL_KNOWN_FOLDERS = frozenset(
+    "archive clutter conflicts conversationhistory deleteditems drafts inbox "
+    "junkemail localfailures msgfolderroot outbox recoverableitemsdeletions "
+    "scheduled searchfolders sentitems serverfailures syncissues".split()
+)
+
+
+def create_folder(display_name: str, parent_id: str | None = None) -> dict:
+    """Create a mail folder (top-level, or under parent_id if given)."""
+    path = "/me/mailFolders"
+    if parent_id:
+        path = f"/me/mailFolders/{quote(parent_id, safe='')}/childFolders"
+    with _client() as c:
+        r = c.post(path, json={"displayName": display_name})
+        r.raise_for_status()
+        return r.json()
+
+
+def resolve_folder(name_or_id: str) -> str:
+    """Turn a human folder name into something Graph's move endpoint accepts.
+    Well-known names pass through; a display name is looked up (case-insensitive)
+    against the user's folders and swapped for its id; anything else (assumed to
+    already be an id) is returned unchanged."""
+    key = (name_or_id or "").strip()
+    if key.lower() in WELL_KNOWN_FOLDERS:
+        return key.lower()
+    for f in list_folders():
+        if (f.get("displayName") or "").lower() == key.lower():
+            return f["id"]
+    return name_or_id
+
+
 def get_folder_counts(folder_id_or_name: str = "inbox") -> dict:
     with _client() as c:
         r = c.get(f"/me/mailFolders/{quote(folder_id_or_name, safe='')}")
@@ -173,6 +206,7 @@ def get_message(message_id: str, include_body: bool = True, text_body: bool = Tr
 
 def move_message(message_id: str, destination_folder: str) -> dict:
     message_id = resolve_id(message_id)
+    destination_folder = resolve_folder(destination_folder)
     with _client() as c:
         r = c.post(f"/me/messages/{quote(message_id, safe='')}/move", json={"destinationId": destination_folder})
         r.raise_for_status()
@@ -221,6 +255,7 @@ def bulk_mark_read(message_ids: list[str], is_read: bool = True) -> dict:
 
 def bulk_move_messages(message_ids: list[str], destination_folder: str) -> dict:
     message_ids = [resolve_id(m) for m in message_ids]
+    destination_folder = resolve_folder(destination_folder)
     requests = [
         {
             "id": str(i),
@@ -247,3 +282,105 @@ def bulk_delete_messages(message_ids: list[str]) -> dict:
         for i, mid in enumerate(message_ids)
     ]
     return _bulk_result(message_ids, _batch(requests))
+
+
+def create_draft(
+    subject: str,
+    body: str,
+    to: list[str],
+    cc: list[str] | None = None,
+    body_type: str = "Text",
+) -> dict:
+    """Create a brand-new draft message (not a reply). Draft-only: this never
+    sends. Mail.ReadWrite (our scope) can create drafts but cannot send, so the
+    human sends it from Outlook after review."""
+    msg = {
+        "subject": subject,
+        "body": {"contentType": body_type, "content": body},
+        "toRecipients": [{"emailAddress": {"address": a}} for a in to],
+    }
+    if cc:
+        msg["ccRecipients"] = [{"emailAddress": {"address": a}} for a in cc]
+    with _client() as c:
+        r = c.post("/me/messages", json=msg)
+        r.raise_for_status()
+        return r.json()
+
+
+# --- Newsletter / unsubscribe -----------------------------------------------
+def get_headers(message_id: str) -> dict:
+    """Fetch a single message's internet (RFC 5322) headers plus from/subject."""
+    message_id = resolve_id(message_id)
+    with _client() as c:
+        r = c.get(
+            f"/me/messages/{quote(message_id, safe='')}",
+            params={"$select": "internetMessageHeaders,from,subject,id"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+def batch_get_headers(message_ids: list[str]) -> list[dict]:
+    """Fetch internetMessageHeaders for many messages via $batch (chunked to
+    Graph's 20/call limit). Returns the message dicts that came back OK, in
+    request order; failed sub-requests are dropped."""
+    message_ids = [resolve_id(m) for m in message_ids]
+    requests = [
+        {
+            "id": str(i),
+            "method": "GET",
+            "url": f"/me/messages/{quote(mid, safe='')}?$select=internetMessageHeaders,from,subject,id",
+        }
+        for i, mid in enumerate(message_ids)
+    ]
+    out = []
+    for resp in _batch(requests):
+        if 200 <= resp.get("status", 0) < 300 and isinstance(resp.get("body"), dict):
+            out.append(resp["body"])
+    return out
+
+
+def parse_unsubscribe(message: dict) -> dict:
+    """Read the List-Unsubscribe / List-Unsubscribe-Post headers and classify
+    the unsubscribe mechanism the sender offers.
+
+    method is one of:
+      one-click  - RFC 8058 one-click; POST to `url` unsubscribes (no browser).
+      mailto     - send an email to `mailto` to unsubscribe.
+      weblink    - only an https link; a human should open `url` in a browser.
+      none       - no List-Unsubscribe header (probably not a bulk sender).
+    """
+    import re
+
+    headers = {
+        (h.get("name") or "").lower(): (h.get("value") or "")
+        for h in (message.get("internetMessageHeaders") or [])
+    }
+    lu = headers.get("list-unsubscribe")
+    if not lu:
+        return {"method": "none"}
+    targets = re.findall(r"<([^>]+)>", lu)
+    mailtos = [t for t in targets if t.lower().startswith("mailto:")]
+    https = [t for t in targets if t.lower().startswith("http")]
+    # RFC 8058: List-Unsubscribe-Post: List-Unsubscribe=One-Click
+    one_click = "one-click" in headers.get("list-unsubscribe-post", "").lower()
+    if one_click and https:
+        return {"method": "one-click", "url": https[0]}
+    if https:
+        return {"method": "weblink", "url": https[0]}
+    if mailtos:
+        return {"method": "mailto", "mailto": mailtos[0]}
+    return {"method": "unknown", "raw": lu}
+
+
+def http_one_click_unsubscribe(url: str) -> int:
+    """Perform an RFC 8058 one-click unsubscribe: POST the standard form body to
+    the sender's List-Unsubscribe URL. Unauthenticated request to an external
+    host by design (the URL comes from the email). Returns the HTTP status."""
+    with httpx.Client(timeout=20.0, follow_redirects=True) as c:
+        r = c.post(
+            url,
+            content="List-Unsubscribe=One-Click",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        return r.status_code

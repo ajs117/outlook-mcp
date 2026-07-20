@@ -9,8 +9,29 @@ Tools it exposes: `list_folders`, `inbox_summary`, `list_messages`,
 `get_message`, `archive_message`, `move_message`, `delete_message`,
 `mark_read`, `create_reply_draft`, bulk variants `bulk_mark_read`,
 `bulk_move_messages`, `bulk_archive_messages`, `bulk_delete_messages`
-(all backed by Graph's `$batch` endpoint, chunked to 20 ops/call), and
-`bulk_by_query` (match + act in one call, ids never leave the server).
+(all backed by Graph's `$batch` endpoint, chunked to 20 ops/call),
+`bulk_by_query` (match + act in one call, ids never leave the server),
+`create_draft` (compose a new draft), `create_folder`, `find_newsletters`
+and `unsubscribe`.
+
+### Common workflows
+
+- **Triage a big folder / clear old mail.** Use `bulk_by_query` with a
+  `search` term and `received_before` to sweep, e.g. delete old shipping
+  notifications: `action="delete", search="delivery", received_before="2026-06-01"`.
+  It runs `dry_run` first (count + sample), then executes on the second call.
+  Custom folders work by name — `action="move", destination_folder="Receipts"`
+  resolves the name to its id (create it first with `create_folder` if needed).
+- **Unsubscribe from newsletters.** `find_newsletters` lists bulk senders and
+  how each can be unsubscribed; call `unsubscribe(ref, execute=True)` per sender.
+  RFC 8058 one-click senders are unsubscribed with a single POST (no browser);
+  `mailto` senders get an unsubscribe draft to send; link-only senders return a
+  URL to open yourself (never auto-fetched). Then `bulk_by_query` to clear them.
+  Note: unsubscribing confirms your address is live — do it for legitimate
+  senders; for real spam, just delete/block.
+- **Draft an email.** `create_draft(to, subject, body)` saves to Drafts and
+  never sends — you review and send from Outlook. (This server holds
+  `Mail.ReadWrite`, which can create drafts but deliberately cannot send.)
 `list_messages` also takes `fetch_all=True` to page past the default
 25-message limit (up to `max_results`, default 500) instead of returning
 a single page.

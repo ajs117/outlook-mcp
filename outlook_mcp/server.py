@@ -235,6 +235,8 @@ def bulk_by_query(
     filter_query: Optional[str] = None,
     search: Optional[str] = None,
     destination_folder: Optional[str] = None,
+    received_before: Optional[str] = None,
+    received_after: Optional[str] = None,
     max_results: int = 1000,
     dry_run: bool = True,
 ) -> dict:
@@ -243,9 +245,13 @@ def bulk_by_query(
     by far the cheapest way to triage in bulk.
 
     action: one of archive, delete, mark_read, mark_unread, move
-        (move requires destination_folder).
+        (move requires destination_folder, which may be a folder display name).
     folder / filter_query / search: same matching semantics as list_messages
         (fetches all matches up to max_results).
+    received_before / received_after: ISO dates (e.g. "2026-01-01"); applied
+        client-side AFTER matching, so they compose with `search` — which Graph
+        itself won't combine with a date $filter. Use these for "old <topic>"
+        sweeps, e.g. search="delivery" + received_before to clear old shipping mail.
     dry_run: TRUE by default — returns how many messages would be affected plus a
         small sample of subjects/senders, and does nothing. Review it, then call
         again with dry_run=False to actually run the action. This guards against
@@ -264,6 +270,12 @@ def bulk_by_query(
         max_results=max_results,
         include_preview=False,
     )
+    # ISO 8601 timestamps sort lexically, so string comparison is a valid date
+    # filter (Graph returns e.g. "2026-07-20T14:20:54Z").
+    if received_before:
+        msgs = [m for m in msgs if (m.get("receivedDateTime") or "") < received_before]
+    if received_after:
+        msgs = [m for m in msgs if (m.get("receivedDateTime") or "") > received_after]
     ids = [m["id"] for m in msgs]
 
     if dry_run:
@@ -297,6 +309,109 @@ def bulk_by_query(
     else:  # move
         res = graph.bulk_move_messages(ids, destination_folder)
     return {"action": action, "matched": len(ids), **res}
+
+
+@mcp.tool()
+def create_draft(
+    to: list[str],
+    subject: str,
+    body: str,
+    cc: Optional[list[str]] = None,
+    html: bool = False,
+) -> dict:
+    """Compose a brand-new draft email (NOT a reply). It is saved to Drafts and
+    never sent — you review and send it from Outlook.
+
+    Args:
+        to: recipient email addresses.
+        subject: subject line.
+        body: message body (plain text by default; set html=True to send HTML).
+        cc: optional cc email addresses.
+        html: treat body as HTML instead of plain text.
+    """
+    d = graph.create_draft(subject, body, to, cc=cc, body_type="HTML" if html else "Text")
+    return {"draft_ref": graph.ref_for(d["id"]), "webLink": d.get("webLink")}
+
+
+@mcp.tool()
+def create_folder(display_name: str, parent_folder: Optional[str] = None) -> dict:
+    """Create a mail folder. parent_folder (id or display name) nests it; omit
+    for a top-level folder. Useful before moving mail into a new folder."""
+    parent_id = graph.resolve_folder(parent_folder) if parent_folder else None
+    f = graph.create_folder(display_name, parent_id=parent_id)
+    return {"id": f["id"], "displayName": f.get("displayName")}
+
+
+@mcp.tool()
+def find_newsletters(folder: str = "inbox", max_check: int = 100) -> list[dict]:
+    """Scan a folder for bulk/newsletter mail (messages carrying a
+    List-Unsubscribe header) and report, per message, how it can be
+    unsubscribed. Use this to drive an unsubscribe sweep, then unsubscribe()
+    each ref (and optionally bulk_by_query to archive/delete them).
+
+    Returns rows: {ref, from, subject, method}. method is one-click / mailto /
+    weblink (see unsubscribe()). Checks up to max_check recent messages.
+    """
+    msgs = graph.list_messages(folder=folder, fetch_all=True, max_results=max_check)
+    detailed = graph.batch_get_headers([m["id"] for m in msgs])
+    out = []
+    for m in detailed:
+        info = graph.parse_unsubscribe(m)
+        if info["method"] == "none":
+            continue
+        out.append(
+            {
+                "ref": graph.ref_for(m["id"]),
+                "from": (m.get("from") or {}).get("emailAddress", {}).get("address"),
+                "subject": m.get("subject"),
+                "method": info["method"],
+            }
+        )
+    return out
+
+
+@mcp.tool()
+def unsubscribe(message_id: str, execute: bool = False) -> dict:
+    """Unsubscribe from the bulk sender of a message (ref or raw id).
+
+    Reads the message's List-Unsubscribe headers and:
+      - method "one-click": with execute=True, performs the RFC 8058 one-click
+        POST and returns the HTTP status — no browser needed.
+      - method "mailto": with execute=True, creates a DRAFT unsubscribe email to
+        the sender's unsubscribe address for you to send (our mail scope can
+        create but not send mail).
+      - method "weblink": returns the URL for you to open in a browser; not
+        auto-fetched, since blindly GETting links embedded in email is unsafe.
+
+    With execute=False (default) it only reports the available method/target so
+    you can decide. Caveat: unsubscribing confirms your address is live, so do it
+    for legitimate senders — for actual spam, prefer delete/block instead.
+    """
+    msg = graph.get_headers(message_id)
+    info = graph.parse_unsubscribe(msg)
+    sender = (msg.get("from") or {}).get("emailAddress", {}).get("address")
+    result = {"ref": graph.ref_for(msg["id"]), "from": sender, **info}
+
+    if not execute or info["method"] in ("none", "unknown", "weblink"):
+        if info["method"] == "weblink":
+            result["note"] = "Open `url` in a browser to finish; not auto-fetched for safety."
+        elif execute:
+            result["note"] = "Nothing to execute for this method."
+        return result
+
+    if info["method"] == "one-click":
+        status = graph.http_one_click_unsubscribe(info["url"])
+        result["executed"] = True
+        result["http_status"] = status
+        result["ok"] = 200 <= status < 400
+    elif info["method"] == "mailto":
+        # mailto:addr?subject=...  -> draft to that address so the user can send.
+        addr = info["mailto"][len("mailto:"):].split("?", 1)[0]
+        d = graph.create_draft("unsubscribe", "unsubscribe", [addr])
+        result["executed"] = False
+        result["draft_ref"] = graph.ref_for(d["id"])
+        result["note"] = "Unsubscribe draft created — send it from Outlook (our scope can't send)."
+    return result
 
 
 def main() -> None:
