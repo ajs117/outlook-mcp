@@ -214,12 +214,15 @@ def move_message(message_id: str, destination_folder: str) -> dict:
 
 
 def delete_message(message_id: str) -> None:
-    """Moves the message to Deleted Items (Graph DELETE on /messages is a
-    soft delete to the Deleted Items folder, not a permanent purge)."""
-    message_id = resolve_id(message_id)
-    with _client() as c:
-        r = c.delete(f"/me/messages/{quote(message_id, safe='')}")
-        r.raise_for_status()
+    """Move the message to the *visible* Deleted Items folder.
+
+    Deliberately uses the /move action, NOT the HTTP DELETE verb. Graph's DELETE
+    on a message does not put it in Deleted Items — it soft-deletes into the
+    hidden Recoverable Items ("dumpster") area, where the message vanishes from
+    Outlook entirely and is only retrievable via "Recover items deleted from
+    this folder". That is not what a user means by "delete", so we move instead.
+    """
+    move_message(message_id, "deleteditems")
 
 
 def mark_read(message_id: str, is_read: bool = True) -> dict:
@@ -274,14 +277,10 @@ def bulk_archive_messages(message_ids: list[str]) -> dict:
 
 
 def bulk_delete_messages(message_ids: list[str]) -> dict:
-    """Soft-deletes each message (moves to Deleted Items), same semantics as
-    delete_message()."""
-    message_ids = [resolve_id(m) for m in message_ids]
-    requests = [
-        {"id": str(i), "method": "DELETE", "url": f"/me/messages/{quote(mid, safe='')}"}
-        for i, mid in enumerate(message_ids)
-    ]
-    return _bulk_result(message_ids, _batch(requests))
+    """Move each message to the visible Deleted Items folder — same semantics as
+    delete_message(), and for the same reason it uses /move rather than the HTTP
+    DELETE verb (DELETE hides mail in the Recoverable Items dumpster)."""
+    return bulk_move_messages(message_ids, "deleteditems")
 
 
 def create_draft(
