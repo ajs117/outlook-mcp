@@ -48,17 +48,30 @@ def list_messages(
     skip: int = 0,
     filter_query: Optional[str] = None,
     search: Optional[str] = None,
+    fetch_all: bool = False,
+    max_results: int = 500,
 ) -> list[dict]:
     """List messages in a folder, newest first (unless searching).
 
     Args:
         folder: folder id or well-known name (inbox, archive, deleteditems, sentitems, drafts, junkemail).
-        top: max number of messages to return (page size).
-        skip: number of messages to skip, for paging.
+        top: max number of messages to return per page (ignored if fetch_all is True).
+        skip: number of messages to skip, for manual paging (ignored if fetch_all is True).
         filter_query: raw OData $filter, e.g. "receivedDateTime le 2026-01-01T00:00:00Z" or "isRead eq false".
         search: free-text search (Graph $search); when set, filter_query/order are ignored.
+        fetch_all: if True, follow pagination automatically and return up to max_results messages
+            instead of a single page of `top`. Use this for bulk operations over a whole folder.
+        max_results: cap on messages returned when fetch_all is True (safety limit, default 500).
     """
-    msgs = graph.list_messages(folder=folder, top=top, skip=skip, filter_query=filter_query, search=search)
+    msgs = graph.list_messages(
+        folder=folder,
+        top=top,
+        skip=skip,
+        filter_query=filter_query,
+        search=search,
+        fetch_all=fetch_all,
+        max_results=max_results,
+    )
     return [
         {
             "id": m["id"],
@@ -120,6 +133,46 @@ def create_reply_draft(message_id: str, comment: str = "") -> dict:
     """Create a draft reply to a message (does NOT send it) so a human can review/send from Outlook."""
     d = graph.create_reply_draft(message_id, comment)
     return {"draft_id": d.get("id"), "webLink": d.get("webLink")}
+
+
+@mcp.tool()
+def bulk_mark_read(message_ids: list[str], is_read: bool = True) -> dict:
+    """Mark many messages as read/unread in one call (Graph $batch, up to hundreds of ids).
+
+    Returns {"succeeded": [ids...], "failed": [{"id", "status", "error"}...]}.
+    """
+    return graph.bulk_mark_read(message_ids, is_read)
+
+
+@mcp.tool()
+def bulk_move_messages(message_ids: list[str], destination_folder: str) -> dict:
+    """Move many messages to a folder in one call.
+
+    Args:
+        message_ids: message ids to move.
+        destination_folder: folder id or well-known name (archive, deleteditems, inbox, etc.).
+
+    Returns {"succeeded": [ids...], "failed": [{"id", "status", "error"}...]}.
+    """
+    return graph.bulk_move_messages(message_ids, destination_folder)
+
+
+@mcp.tool()
+def bulk_archive_messages(message_ids: list[str]) -> dict:
+    """Move many messages to the Archive folder in one call.
+
+    Returns {"succeeded": [ids...], "failed": [{"id", "status", "error"}...]}.
+    """
+    return graph.bulk_archive_messages(message_ids)
+
+
+@mcp.tool()
+def bulk_delete_messages(message_ids: list[str]) -> dict:
+    """Soft-delete many messages (move to Deleted Items) in one call.
+
+    Returns {"succeeded": [ids...], "failed": [{"id", "status", "error"}...]}.
+    """
+    return graph.bulk_delete_messages(message_ids)
 
 
 def main() -> None:

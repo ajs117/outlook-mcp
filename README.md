@@ -7,7 +7,12 @@ machine — no third-party service sees your mail.
 
 Tools it exposes: `list_folders`, `inbox_summary`, `list_messages`,
 `get_message`, `archive_message`, `move_message`, `delete_message`,
-`mark_read`, `create_reply_draft`.
+`mark_read`, `create_reply_draft`, and bulk variants `bulk_mark_read`,
+`bulk_move_messages`, `bulk_archive_messages`, `bulk_delete_messages`
+(all backed by Graph's `$batch` endpoint, chunked to 20 ops/call).
+`list_messages` also takes `fetch_all=True` to page past the default
+25-message limit (up to `max_results`, default 500) instead of returning
+a single page.
 
 ## 1. Create a free Azure app registration (one-time, ~10 min)
 
