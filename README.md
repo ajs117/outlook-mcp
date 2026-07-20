@@ -7,9 +7,10 @@ machine — no third-party service sees your mail.
 
 Tools it exposes: `list_folders`, `inbox_summary`, `list_messages`,
 `get_message`, `archive_message`, `move_message`, `delete_message`,
-`mark_read`, `create_reply_draft`, and bulk variants `bulk_mark_read`,
+`mark_read`, `create_reply_draft`, bulk variants `bulk_mark_read`,
 `bulk_move_messages`, `bulk_archive_messages`, `bulk_delete_messages`
-(all backed by Graph's `$batch` endpoint, chunked to 20 ops/call).
+(all backed by Graph's `$batch` endpoint, chunked to 20 ops/call), and
+`bulk_by_query` (match + act in one call, ids never leave the server).
 `list_messages` also takes `fetch_all=True` to page past the default
 25-message limit (up to `max_results`, default 500) instead of returning
 a single page.
@@ -23,15 +24,24 @@ token cost when listing or bulk-triaging a mailbox. To keep tool traffic small:
   instead of the raw id. Every tool accepts a ref in place of an id and
   resolves it server-side, so you pass `m12`, not a 150-char string. Refs are
   stable for the life of the server process; after a restart, just re-list.
-- **Lean listings.** `list_messages` omits body previews by default
-  (`include_preview=True` to opt in, truncated to `preview_chars`) and returns
-  only the fields needed for triage.
+- **Lean listings.** `list_messages` returns only triage fields by default.
+  For content, prefer `include_keywords=True` (a short salient-word list per
+  message — denser than a preview) and reach for `get_message` for a full read.
+  `include_preview=True` still attaches the full plaintext preview when wanted.
 - **Plaintext, truncated bodies.** `get_message` asks Graph for the plaintext
   body (not raw HTML) and truncates to `max_chars` (default 4000);
   `include_body=False` gives metadata only.
 - **Compact bulk results.** The `bulk_*` tools return `{"ok": <count>,
   "failed_count": <n>, "failed": [...]}` — succeeded ids are counted, not
   echoed back.
+- **Filter-and-act — ids never touch the conversation.** `bulk_by_query`
+  matches messages by folder/`filter_query`/`search` and applies one action
+  (`archive`/`delete`/`mark_read`/`mark_unread`/`move`) to all of them
+  server-side, returning just a count. This is the cheapest way to triage:
+  no id list is ever streamed through the model. It runs `dry_run=True` by
+  default (returns a count + small sample and does nothing) so a bad filter
+  can't silently nuke the wrong mail — call again with `dry_run=False` to
+  execute.
 
 ## 1. Create a free Azure app registration (one-time, ~10 min)
 
