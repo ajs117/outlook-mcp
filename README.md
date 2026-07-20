@@ -14,6 +14,25 @@ Tools it exposes: `list_folders`, `inbox_summary`, `list_messages`,
 25-message limit (up to `max_results`, default 500) instead of returning
 a single page.
 
+### Token efficiency
+
+Graph message ids are ~150 characters of opaque base64 each, which dominates
+token cost when listing or bulk-triaging a mailbox. To keep tool traffic small:
+
+- **Short refs.** Listings return a compact `ref` (e.g. `m12`) per message
+  instead of the raw id. Every tool accepts a ref in place of an id and
+  resolves it server-side, so you pass `m12`, not a 150-char string. Refs are
+  stable for the life of the server process; after a restart, just re-list.
+- **Lean listings.** `list_messages` omits body previews by default
+  (`include_preview=True` to opt in, truncated to `preview_chars`) and returns
+  only the fields needed for triage.
+- **Plaintext, truncated bodies.** `get_message` asks Graph for the plaintext
+  body (not raw HTML) and truncates to `max_chars` (default 4000);
+  `include_body=False` gives metadata only.
+- **Compact bulk results.** The `bulk_*` tools return `{"ok": <count>,
+  "failed_count": <n>, "failed": [...]}` — succeeded ids are counted, not
+  echoed back.
+
 ## 1. Create a free Azure app registration (one-time, ~10 min)
 
 You need this to get a `client_id`. It costs nothing — no Azure subscription
