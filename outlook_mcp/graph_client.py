@@ -154,6 +154,39 @@ def get_folder_counts(folder_id_or_name: str = "inbox") -> dict:
         }
 
 
+def _build_list_params(
+    *,
+    top: int,
+    skip: int,
+    filter_query: str | None,
+    order_by: str,
+    search: str | None,
+    fetch_all: bool,
+    max_results: int,
+    include_preview: bool,
+) -> dict:
+    """Build the OData query params for a message listing.
+
+    Kept pure (no I/O) so the query-shaping rules are unit-testable without a
+    network/auth round-trip. The critical rule: Graph rejects `$search` when it
+    is combined with `$orderby`, `$filter`, or `$skip` — a `$search` request is
+    relevance-ordered and paged via `$skiptoken` (the `@odata.nextLink`) only.
+    Sending `$skip` alongside `$search` is a 400, so `$skip` lives strictly in
+    the non-search branch."""
+    select = MESSAGE_FIELDS + ",bodyPreview" if include_preview else MESSAGE_FIELDS
+    page_size = min(max_results, 999) if fetch_all else min(top, 999)
+    params: dict = {"$top": page_size, "$select": select}
+    if search:
+        params["$search"] = f'"{search}"'
+    else:
+        params["$orderby"] = order_by
+        if filter_query:
+            params["$filter"] = filter_query
+        if not fetch_all:
+            params["$skip"] = skip
+    return params
+
+
 def list_messages(
     folder: str = "inbox",
     top: int = 25,
@@ -170,18 +203,20 @@ def list_messages(
     pagination and collect up to max_results messages across pages.
 
     bodyPreview is only fetched when include_preview is True, since a full
-    preview per message across a large folder is a major token cost."""
-    select = MESSAGE_FIELDS + ",bodyPreview" if include_preview else MESSAGE_FIELDS
-    params = {"$top": min(top, 999) if not fetch_all else min(max_results, 999), "$select": select}
-    if not fetch_all:
-        params["$skip"] = skip
-    if search:
-        # $search cannot be combined with $orderby or most $filter usage
-        params["$search"] = f'"{search}"'
-    else:
-        params["$orderby"] = order_by
-        if filter_query:
-            params["$filter"] = filter_query
+    preview per message across a large folder is a major token cost.
+
+    Note: when `search` is set, `skip`, `order_by` and `filter_query` are
+    ignored — Graph does not allow them alongside `$search`."""
+    params = _build_list_params(
+        top=top,
+        skip=skip,
+        filter_query=filter_query,
+        order_by=order_by,
+        search=search,
+        fetch_all=fetch_all,
+        max_results=max_results,
+        include_preview=include_preview,
+    )
     with _client() as c:
         path = f"/me/mailFolders/{quote(folder, safe='')}/messages"
         if fetch_all:
