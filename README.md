@@ -11,27 +11,55 @@ Tools it exposes: `list_folders`, `inbox_summary`, `list_messages`,
 `bulk_move_messages`, `bulk_archive_messages`, `bulk_delete_messages`
 (all backed by Graph's `$batch` endpoint, chunked to 20 ops/call),
 `bulk_by_query` (match + act in one call, ids never leave the server),
-`create_draft` (compose a new draft), `create_folder`, `find_newsletters`
-and `unsubscribe`.
+`create_draft` (compose a new draft), `create_folder`, `sender_summary`
+(per-sender counts and read rates), `find_newsletters`, `unsubscribe`,
+`unsubscribe_many` and `protected_senders` (a keep-list bulk ops won't touch).
 
 ### Common workflows
 
+- **Decide what to keep — measure, don't guess.** `sender_summary` groups a
+  folder by exact sending address and reports count, read, unread and
+  `read_pct` per sender. A sender nobody opens is evidence; a sender whose
+  name *sounds* like junk is not. Rows carry a heuristic `brand` label for
+  display only — grouping is always by the full address, and `brand_shared`
+  flags addresses whose brand collides with another, because
+  `hello@edfenergy.com` (bills) and `hello@home.edfenergy.com` (marketing) are
+  two different senders that must never be merged.
 - **Triage a big folder / clear old mail.** Use `bulk_by_query` with a
   `search` term and `received_before` to sweep, e.g. delete old shipping
   notifications: `action="delete", search="delivery", received_before="2026-06-01"`.
   It runs `dry_run` first (count + sample), then executes on the second call.
   Custom folders work by name — `action="move", destination_folder="Receipts"`
   resolves the name to its id (create it first with `create_folder` if needed).
-- **Unsubscribe from newsletters.** `find_newsletters` lists bulk senders and
-  how each can be unsubscribed; call `unsubscribe(ref, execute=True)` per sender.
-  RFC 8058 one-click senders are unsubscribed with a single POST (no browser);
-  `mailto` senders get an unsubscribe draft to send; link-only senders return a
-  URL to open yourself (never auto-fetched). Then clear them with
+- **Unsubscribe from newsletters.** `find_newsletters` lists bulk senders
+  (grouped by sender, with read counts and the best unsubscribe method for
+  each); `unsubscribe_many(refs, execute=True)` then does the whole sweep in
+  one call. RFC 8058 one-click senders are unsubscribed with a single POST (no
+  browser); `mailto` senders get an unsubscribe draft to send; link-only
+  senders — and one-click endpoints that reject the POST, which some privacy
+  portals do with a 405 — come back under `needs_browser` with a URL to open
+  yourself (never auto-fetched). **The List-Unsubscribe header means "bulk
+  sender", not "junk"**: order confirmations, delivery updates, bank
+  statements and voucher codes all carry it, so treat the output as candidates
+  to show a human, never as a sweep list. Then clear the wanted ones with
   `bulk_by_query(action="archive", only_newsletters=True)` — the
   `only_newsletters` filter keeps just the bulk mail (List-Unsubscribe header)
   among the matches, so you can e.g. archive every newsletter older than a week.
   Note: unsubscribing confirms your address is live — do it for legitimate
   senders; for real spam, just delete/block.
+- **Protect the mail you can't afford to lose.** `protected_senders(add=[...])`
+  stores a keep-list — benefits, medical, legal, bills, anything with a case
+  number. A pattern with `*`/`?` is a glob over the whole address
+  (`*@edfenergy.com`, which deliberately does *not* match a marketing
+  subdomain); one without is a substring test (`dwp`). `bulk_by_query` then
+  excludes protected senders from every sweep and reports how many it held
+  back (`on_protected="error"` to abort instead, `"include"` to ignore the
+  list), and `bulk_delete_messages` refuses outright unless called with
+  `allow_protected=True`. The list lives in `~/.outlook_mcp_config.json`
+  (override with `OUTLOOK_MCP_CONFIG`).
+- **Act on specific senders.** `bulk_by_query(senders_only=[...])` filters
+  matches to an exact set of addresses client-side — Graph rejects a sender
+  `$filter` alongside `$orderby`, so this is the supported route.
 - **Draft an email.** `create_draft(to, subject, body)` saves to Drafts and
   never sends — you review and send from Outlook. (This server holds
   `Mail.ReadWrite`, which can create drafts but deliberately cannot send.)

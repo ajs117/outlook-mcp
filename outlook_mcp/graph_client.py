@@ -44,6 +44,24 @@ def resolve_id(ref_or_id: str) -> str:
     return _REF_TO_ID.get(ref_or_id, ref_or_id)
 
 
+# Sender addresses seen on any message this process has fetched. Lets the
+# keep-list be checked for a list of bare refs without spending a round trip
+# re-fetching mail we already read.
+_ID_TO_SENDER: dict[str, str] = {}
+
+
+def _note_senders(messages: list[dict]) -> None:
+    for m in messages:
+        addr = ((m.get("from") or {}).get("emailAddress") or {}).get("address")
+        if addr and m.get("id"):
+            _ID_TO_SENDER[m["id"]] = addr.lower()
+
+
+def sender_for(ref_or_id: str) -> str | None:
+    """Best-known sender for a ref/id, or None if this process never saw it."""
+    return _ID_TO_SENDER.get(resolve_id(ref_or_id))
+
+
 def _client(extra_headers: dict | None = None) -> httpx.Client:
     token = get_access_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -220,10 +238,13 @@ def list_messages(
     with _client() as c:
         path = f"/me/mailFolders/{quote(folder, safe='')}/messages"
         if fetch_all:
-            return _paginated_get(c, path, params, max_results)
-        r = c.get(path, params=params)
-        r.raise_for_status()
-        return r.json().get("value", [])
+            msgs = _paginated_get(c, path, params, max_results)
+        else:
+            r = c.get(path, params=params)
+            r.raise_for_status()
+            msgs = r.json().get("value", [])
+    _note_senders(msgs)
+    return msgs
 
 
 def get_message(message_id: str, include_body: bool = True, text_body: bool = True) -> dict:
@@ -386,6 +407,7 @@ def batch_get_headers(message_ids: list[str]) -> list[dict]:
     for resp in _batch(requests):
         if 200 <= resp.get("status", 0) < 300 and isinstance(resp.get("body"), dict):
             out.append(resp["body"])
+    _note_senders(out)
     return out
 
 
@@ -398,6 +420,11 @@ def parse_unsubscribe(message: dict) -> dict:
       mailto     - send an email to `mailto` to unsubscribe.
       weblink    - only an https link; a human should open `url` in a browser.
       none       - no List-Unsubscribe header (probably not a bulk sender).
+
+    `url` and `mailto` are both returned whenever the header offers them,
+    regardless of which method won — a one-click POST that the sender's
+    endpoint rejects (some privacy portals answer 405) can then fall back to
+    the very same link a human would click, with no second header fetch.
     """
     import re
 
@@ -414,12 +441,19 @@ def parse_unsubscribe(message: dict) -> dict:
     # RFC 8058: List-Unsubscribe-Post: List-Unsubscribe=One-Click
     one_click = "one-click" in headers.get("list-unsubscribe-post", "").lower()
     if one_click and https:
-        return {"method": "one-click", "url": https[0]}
+        method = "one-click"
+    elif https:
+        method = "weblink"
+    elif mailtos:
+        method = "mailto"
+    else:
+        return {"method": "unknown", "raw": lu}
+    info = {"method": method}
     if https:
-        return {"method": "weblink", "url": https[0]}
+        info["url"] = https[0]
     if mailtos:
-        return {"method": "mailto", "mailto": mailtos[0]}
-    return {"method": "unknown", "raw": lu}
+        info["mailto"] = mailtos[0]
+    return info
 
 
 def http_one_click_unsubscribe(url: str) -> int:
