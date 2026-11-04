@@ -75,8 +75,11 @@ def get_access_token() -> str:
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
 
-    if not result:
-        flow = app.initiate_device_flow(scopes=SCOPES)
+    # acquire_token_silent() in msal>=1.37 already folds refresh errors
+    # (invalid_grant, interaction_required) into None, but guard against an
+    # error dict too so an expired refresh token always falls back to login.
+    if not result or "access_token" not in result:
+        flow =app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise RuntimeError(f"Failed to create device flow: {json.dumps(flow, indent=2)}")
         print(flow["message"], file=sys.stderr, flush=True)
